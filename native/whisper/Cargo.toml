@@ -1,0 +1,29 @@
+[package]
+name = "t3-whisper"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+base64 = "0.23.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+whisper-rs = { version = "0.16.0", default-features = false }
+
+[features]
+default = []
+# Opt-in only: every shipped build is CPU, which is the one backend present on
+# macOS, Linux and Windows alike. Enabling one is a per-target build decision
+# nothing makes yet.
+coreml = ["whisper-rs/coreml"]
+cuda = ["whisper-rs/cuda"]
+metal = ["whisper-rs/metal"]
+vulkan = ["whisper-rs/vulkan"]
+
+# No `panic = "abort"` (unlike resource-monitor): the decode path relies on
+# catch_unwind to survive a whisper.cpp failure without dropping every session.
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true

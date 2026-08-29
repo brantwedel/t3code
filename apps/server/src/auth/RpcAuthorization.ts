@@ -127,6 +127,13 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeAuthAccess]: AuthAccessReadScope,
   [WS_METHODS.subscribeBackgroundPolicy]: AuthOrchestrationReadScope,
+  [WS_METHODS.voiceGetStatus]: AuthOrchestrationReadScope,
+  // Dictation spends host CPU and lands text in a draft; a read-only pairing
+  // token must not be able to drive the transcription pipeline.
+  [WS_METHODS.voiceEnsureModel]: AuthOrchestrationOperateScope,
+  [WS_METHODS.voiceSessionStart]: AuthOrchestrationOperateScope,
+  [WS_METHODS.voiceSessionAppend]: AuthOrchestrationOperateScope,
+  [WS_METHODS.voiceSessionClose]: AuthOrchestrationOperateScope,
 } as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
 
 export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {

@@ -463,6 +463,25 @@ export const make = Effect.gen(function* () {
     flushMainWindowBounds = flushBoundsPersist;
 
     yield* previewManager.setMainWindow(window);
+    // Voice dictation captures from the app itself. Only `media` is narrowed —
+    // to this window's own contents, and to audio, so nothing can reach the
+    // camera. Everything else keeps the default session's prior behaviour of
+    // allowing the request; restricting it here would silently take away
+    // clipboard reads, fullscreen and the rest, app-wide. Embedded previews
+    // run on their own partitions with their own stricter handler.
+    window.webContents.session.setPermissionRequestHandler(
+      (webContents, permission, callback, details) => {
+        if (permission !== "media") return callback(true);
+        const wantsVideo = "mediaTypes" in details && details.mediaTypes?.includes("video");
+        callback(webContents === window.webContents && wantsVideo !== true);
+      },
+    );
+    window.webContents.session.setPermissionCheckHandler((webContents, permission) => {
+      if (permission !== "media") return true;
+      // A check can arrive without a frame; the request handler above is what
+      // actually gates capture.
+      return webContents === null || webContents === window.webContents;
+    });
     window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
       if (
         typeof params.partition !== "string" ||

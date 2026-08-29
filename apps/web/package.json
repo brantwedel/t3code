@@ -53,6 +53,7 @@
   "devDependencies": {
     "@effect/platform-node": "catalog:",
     "@effect/vitest": "catalog:",
+    "@lexical/history": "^0.41.0",
     "@rolldown/plugin-babel": "^0.2.0",
     "@tailwindcss/vite": "^4.0.0",
     "@tanstack/router-plugin": "^1.161.0",

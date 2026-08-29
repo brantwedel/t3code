@@ -34,6 +34,10 @@ import {
   FOCUS_COMMAND,
   $getRoot,
   HISTORY_MERGE_TAG,
+  HISTORY_PUSH_TAG,
+  HISTORIC_TAG,
+  UNDO_COMMAND,
+  REDO_COMMAND,
   DecoratorNode,
   type ElementNode,
   type LexicalNode,
@@ -52,6 +56,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  type ComponentProps,
 } from "react";
 
 import {
@@ -865,7 +870,33 @@ function collectTerminalContextIds(node: LexicalNode): string[] {
   return [];
 }
 
+/** How a controlled value change joins the undo history. */
+export type ComposerHistoryMode = "push" | "historic";
+
+const COMPOSER_HISTORY_TAGS: Record<ComposerHistoryMode, string> = {
+  push: HISTORY_PUSH_TAG,
+  historic: HISTORIC_TAG,
+};
+
 export interface ComposerPromptEditorHandle {
+  /** Mark a raw-offset range as provisional voice text; `null` clears it. Call
+   *  only once the editor has `value`, or the offsets land on stale positions. */
+  setProvisionalRange: (range: { start: number; end: number } | null) => void;
+  /** Mark a range as a voice command counting down; same ordering rule. */
+  setCommandRange: (range: { start: number; end: number } | null) => void;
+  /** Claimed by the change that produces `forValue`, then forgotten. */
+  setNextValueHistory: (mode: ComposerHistoryMode, forValue: string) => void;
+  /**
+   * Give the undo history a state to fall back to, if it has none yet: a push
+   * records whatever it is sitting on, so without this the first records nothing.
+   */
+  anchorHistory: () => void;
+  /** Record the draft as one undo step. Dictation cannot do this by tagging a
+   *  write, since the write completing an utterance often changes nothing. */
+  pushHistory: () => void;
+  /** Step the composer's own undo history, the same one Ctrl+Z drives. */
+  undo: () => void;
+  redo: () => void;
   focus: () => void;
   focusAt: (cursor: number) => void;
   focusAtEnd: () => void;
@@ -1555,6 +1586,18 @@ function ComposerPromptEditorInner({
     terminalContextIds: terminalContexts.map((context) => context.id),
   });
   const isApplyingControlledUpdateRef = useRef(false);
+  // Set just before the value that should carry it; see the sync effect below.
+  const nextValueHistoryRef = useRef<{ mode: ComposerHistoryMode; value: string } | null>(null);
+  // Owned here rather than by the plugin so `anchorHistory` can seed it: a
+  // push with no current entry records nothing.
+  const historyState = useMemo(
+    (): NonNullable<ComponentProps<typeof HistoryPlugin>["externalHistoryState"]> => ({
+      current: null,
+      redoStack: [],
+      undoStack: [],
+    }),
+    [],
+  );
   const terminalContextActions = useMemo(
     () => ({ onRemoveTerminalContext }),
     [onRemoveTerminalContext],
@@ -1573,6 +1616,12 @@ function ComposerPromptEditorInner({
   }, [disabled, editor]);
 
   useLayoutEffect(() => {
+    // Claimed only by the value it was set for; another render reaching here
+    // first would consume it and leave the real change untagged.
+    const pendingHistory = nextValueHistoryRef.current;
+    const valueHistory =
+      pendingHistory !== null && pendingHistory.value === value ? pendingHistory.mode : null;
+    if (valueHistory !== null) nextValueHistoryRef.current = null;
     const normalizedCursor = clampCollapsedComposerCursor(value, cursor);
     const previousSnapshot = snapshotRef.current;
     const contextsChanged = terminalContextsSignatureRef.current !== terminalContextsSignature;
@@ -1601,17 +1650,26 @@ function ComposerPromptEditorInner({
       return;
     }
 
+    const shouldRewriteEditorState =
+      previousSnapshot.value !== value || contextsChanged || skillsChanged;
     isApplyingControlledUpdateRef.current = true;
-    editor.update(() => {
-      const shouldRewriteEditorState =
-        previousSnapshot.value !== value || contextsChanged || skillsChanged;
-      if (shouldRewriteEditorState) {
-        $setComposerEditorPrompt(value, terminalContexts, skillMetadataRef.current);
-      }
-      if (shouldRewriteEditorState || isFocused) {
-        $setSelectionAtComposerOffset(normalizedCursor);
-      }
-    });
+    editor.update(
+      () => {
+        if (shouldRewriteEditorState) {
+          $setComposerEditorPrompt(value, terminalContexts, skillMetadataRef.current);
+        }
+        if (shouldRewriteEditorState || isFocused) {
+          $setSelectionAtComposerOffset(normalizedCursor);
+        }
+      },
+      // A caret-only sync is never an undo step, and untagged it would move
+      // the history anchor onto the current text.
+      !shouldRewriteEditorState
+        ? { tag: HISTORIC_TAG }
+        : valueHistory === null
+          ? undefined
+          : { tag: COMPOSER_HISTORY_TAGS[valueHistory] },
+    );
     queueMicrotask(() => {
       isApplyingControlledUpdateRef.current = false;
     });
@@ -1623,6 +1681,8 @@ function ComposerPromptEditorInner({
       if (!rootElement) return;
       const boundedCursor = clampCollapsedComposerCursor(snapshotRef.current.value, nextCursor);
       rootElement.focus({ preventScroll: true });
+      // Untagged: a caret move merges, seeding the history for editors that
+      // have not been dictated into yet.
       editor.update(() => {
         $setSelectionAtComposerOffset(boundedCursor);
       });
@@ -1677,9 +1737,77 @@ function ComposerPromptEditorInner({
     return snapshot;
   }, [editor]);
 
+  const setFormattedRange = useCallback(
+    (format: "italic" | "underline", range: { start: number; end: number } | null) => {
+      editor.update(
+        () => {
+          let cleared = false;
+          for (const node of $getRoot().getAllTextNodes()) {
+            if (node.hasFormat(format)) {
+              node.toggleFormat(format);
+              cleared = true;
+            }
+          }
+          const wants = range !== null && range.end > range.start;
+          if (wants) {
+            $setSelectionRangeAtComposerOffsets(range.start, range.end);
+            const selection = $getSelection();
+            if ($isRangeSelection(selection)) {
+              selection.formatText(format);
+            }
+          }
+          if (!wants && !cleared) return;
+          // Formatting works through the selection, so restore the caret the
+          // composer had rather than leaving it across the styled span.
+          $setSelectionAtComposerOffset(
+            clampCollapsedComposerCursor(snapshotRef.current.value, snapshotRef.current.cursor),
+          );
+        },
+        // Styling only, and it runs after every transcript: merging would move
+        // the history anchor onto text the utterance has not finished writing.
+        { tag: HISTORIC_TAG },
+      );
+    },
+    [editor],
+  );
+  const setProvisionalRange = useCallback(
+    (range: { start: number; end: number } | null) => setFormattedRange("italic", range),
+    [setFormattedRange],
+  );
+  const setCommandRange = useCallback(
+    (range: { start: number; end: number } | null) => setFormattedRange("underline", range),
+    [setFormattedRange],
+  );
+
   useImperativeHandle(
     editorRef,
     () => ({
+      setNextValueHistory: (mode: ComposerHistoryMode, forValue: string) => {
+        nextValueHistoryRef.current = { mode, value: forValue };
+      },
+      anchorHistory: () => {
+        if (historyState.current !== null) return;
+        historyState.current = { editor, editorState: editor.getEditorState() };
+      },
+      pushHistory: () => {
+        // Explicit because the write completing an utterance often changes
+        // nothing: whisper's final usually repeats the last partial verbatim.
+        const current = historyState.current;
+        if (current === null) return;
+        historyState.undoStack.push({ ...current });
+        historyState.redoStack.length = 0;
+        historyState.current = { editor, editorState: editor.getEditorState() };
+      },
+      undo: () => {
+        // The user's own change, not the tail of a controlled write; leaving
+        // the guard set would swallow the resulting onChange.
+        isApplyingControlledUpdateRef.current = false;
+        editor.dispatchCommand(UNDO_COMMAND, undefined);
+      },
+      redo: () => {
+        isApplyingControlledUpdateRef.current = false;
+        editor.dispatchCommand(REDO_COMMAND, undefined);
+      },
       focus: () => {
         focusAt(snapshotRef.current.cursor);
       },
@@ -1693,8 +1821,10 @@ function ComposerPromptEditorInner({
         );
       },
       readSnapshot,
+      setProvisionalRange,
+      setCommandRange,
     }),
-    [focusAt, readSnapshot],
+    [editor, focusAt, readSnapshot, setCommandRange, setProvisionalRange],
   );
 
   const handleEditorChange = useCallback((editorState: EditorState) => {
@@ -1781,7 +1911,7 @@ function ComposerPromptEditorInner({
         <ComposerInlineTokenBackspacePlugin />
         <ComposerInlineTokenPastePlugin />
         <ComposerChipSelectionPlugin />
-        <HistoryPlugin />
+        <HistoryPlugin externalHistoryState={historyState} />
       </div>
     </ComposerTerminalContextActionsContext>
   );
@@ -1808,6 +1938,12 @@ export function ComposerPromptEditor({
     () => ({
       namespace: "t3tools-composer-editor",
       editable: true,
+      theme: {
+        text: {
+          italic: "composer-voice-provisional",
+          underline: "composer-voice-command",
+        },
+      },
       nodes: [ComposerMentionNode, ComposerSkillNode, ComposerTerminalContextNode],
       editorState: () => {
         $setComposerEditorPrompt(

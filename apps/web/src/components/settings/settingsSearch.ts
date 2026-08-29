@@ -137,6 +137,26 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/general",
   },
   {
+    id: "voice-dictation",
+    title: "Voice dictation",
+    to: "/settings/general",
+  },
+  {
+    id: "voice-dictation-model",
+    title: "Voice dictation model",
+    to: "/settings/general",
+  },
+  {
+    id: "voice-dictation-commands",
+    title: "Voice commands",
+    to: "/settings/general",
+  },
+  {
+    id: "voice-dictation-language",
+    title: "Voice dictation language",
+    to: "/settings/general",
+  },
+  {
     id: "provider-update-checks",
     title: "Provider update checks",
     to: "/settings/general",

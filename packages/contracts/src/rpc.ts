@@ -205,6 +205,23 @@ import {
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
+import {
+  VoiceModelDownloadError,
+  VoiceModelDownloadInput,
+  VoiceModelNotReadyError,
+  VoiceModelProgressEvent,
+  VoiceSessionAppendInput,
+  VoiceSessionBusyError,
+  VoiceSessionCloseInput,
+  VoiceSessionCursorMismatchError,
+  VoiceSessionNotFoundError,
+  VoiceSessionStartInput,
+  VoiceSessionStartResult,
+  VoiceStatus,
+  VoiceTranscript,
+  VoiceTranscriptionFailedError,
+  VoiceUnsupportedError,
+} from "./voice.ts";
 
 export const WS_METHODS = {
   // Project registry methods
@@ -319,6 +336,13 @@ export const WS_METHODS = {
   sourceControlLookupRepository: "sourceControl.lookupRepository",
   sourceControlCloneRepository: "sourceControl.cloneRepository",
   sourceControlPublishRepository: "sourceControl.publishRepository",
+
+  // Voice dictation methods
+  voiceGetStatus: "voice.getStatus",
+  voiceEnsureModel: "voice.ensureModel",
+  voiceSessionStart: "voice.sessionStart",
+  voiceSessionAppend: "voice.sessionAppend",
+  voiceSessionClose: "voice.sessionClose",
 
   // Streaming subscriptions
   subscribeVcsStatus: "subscribeVcsStatus",
@@ -1017,6 +1041,51 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
   stream: true,
 });
 
+export const WsVoiceGetStatusRpc = Rpc.make(WS_METHODS.voiceGetStatus, {
+  payload: Schema.Struct({}),
+  success: VoiceStatus,
+  error: EnvironmentAuthorizationError,
+});
+
+export const WsVoiceEnsureModelRpc = Rpc.make(WS_METHODS.voiceEnsureModel, {
+  payload: VoiceModelDownloadInput,
+  success: VoiceModelProgressEvent,
+  error: Schema.Union([
+    VoiceUnsupportedError,
+    VoiceModelDownloadError,
+    EnvironmentAuthorizationError,
+  ]),
+  stream: true,
+});
+
+export const WsVoiceSessionStartRpc = Rpc.make(WS_METHODS.voiceSessionStart, {
+  payload: VoiceSessionStartInput,
+  success: VoiceSessionStartResult,
+  error: Schema.Union([
+    VoiceUnsupportedError,
+    VoiceModelNotReadyError,
+    VoiceTranscriptionFailedError,
+    EnvironmentAuthorizationError,
+  ]),
+});
+
+export const WsVoiceSessionAppendRpc = Rpc.make(WS_METHODS.voiceSessionAppend, {
+  payload: VoiceSessionAppendInput,
+  success: VoiceTranscript,
+  error: Schema.Union([
+    VoiceSessionNotFoundError,
+    VoiceSessionBusyError,
+    VoiceSessionCursorMismatchError,
+    VoiceTranscriptionFailedError,
+    EnvironmentAuthorizationError,
+  ]),
+});
+
+export const WsVoiceSessionCloseRpc = Rpc.make(WS_METHODS.voiceSessionClose, {
+  payload: VoiceSessionCloseInput,
+  error: EnvironmentAuthorizationError,
+});
+
 export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
@@ -1112,6 +1181,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeAuthAccessRpc,
   WsSubscribeBackgroundPolicyRpc,
   WsSubscribeResourceTelemetryRpc,
+  WsVoiceGetStatusRpc,
+  WsVoiceEnsureModelRpc,
+  WsVoiceSessionStartRpc,
+  WsVoiceSessionAppendRpc,
+  WsVoiceSessionCloseRpc,
   WsOrchestrationDispatchCommandRpc,
   WsOrchestrationGetWorkflowScriptRpc,
   WsOrchestrationGetTurnDiffRpc,

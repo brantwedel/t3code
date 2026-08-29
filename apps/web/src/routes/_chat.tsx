@@ -19,6 +19,7 @@ import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../termina
 import { isPreviewSupportedInRuntime } from "../previewStateStore";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
+import { VoiceDictationProvider } from "../voice/VoiceDictationProvider";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 
@@ -176,10 +177,10 @@ function ChatRouteGlobalShortcuts() {
 
 function ChatRouteLayout() {
   return (
-    <>
+    <VoiceDictationProvider>
       <ChatRouteGlobalShortcuts />
       <Outlet />
-    </>
+    </VoiceDictationProvider>
   );
 }
 

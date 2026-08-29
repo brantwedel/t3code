@@ -18,6 +18,7 @@ import {
   ProviderInstanceId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+  withMissingVoiceCommands,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
@@ -107,7 +108,11 @@ import {
   shouldUseCompactComposerPrimaryActions,
   shouldUseCompactComposerFooter,
 } from "../composerFooterLayout";
-import { type ComposerPromptEditorHandle, ComposerPromptEditor } from "../ComposerPromptEditor";
+import {
+  type ComposerHistoryMode,
+  type ComposerPromptEditorHandle,
+  ComposerPromptEditor,
+} from "../ComposerPromptEditor";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
@@ -241,6 +246,7 @@ import { toastManager } from "../ui/toast";
 import {
   BotIcon,
   CircleAlertIcon,
+  MicIcon,
   PencilRulerIcon,
   type LucideIcon,
   LockIcon,
@@ -250,6 +256,25 @@ import {
   SparklesIcon,
   XIcon,
 } from "lucide-react";
+import {
+  abandonVoiceUtterance,
+  applyVoiceTranscript,
+  cancelVoiceCommand,
+  initialVoiceDraftState,
+  resolveVoiceCommand,
+  voiceDraftStateAt,
+  voiceProvisionalRange,
+  type VoiceDraftEdit,
+  type VoiceDraftState,
+  type VoicePendingVoiceCommand,
+} from "@t3tools/client-runtime/voice";
+import { useEnvironmentQuery } from "../../state/query";
+import { voiceEnvironment } from "../../state/voice";
+import { useVoiceDictationSession } from "../../voice/VoiceDictationProvider";
+import { useAtomValue } from "@effect/atom-react";
+import { pressShortcutForCommand } from "../../keybindings";
+import { primaryServerKeybindingsAtom } from "~/state/server";
+import { VoiceMicIndicator } from "../../voice/VoiceMicIndicator";
 import { proposedPlanTitle } from "../../proposedPlan";
 import { getProviderInteractionModeToggle } from "../../providerModels";
 import {
@@ -668,6 +693,17 @@ export interface ChatComposerProps {
 // --------------------------------------------------------------------------
 // Component
 // --------------------------------------------------------------------------
+
+/** Hold the mic button at least this long and it acts as push-to-talk. */
+const PUSH_TO_TALK_HOLD_MS = 2_000;
+
+/**
+ * Whether the mic control has been shown at all this session. Composers are
+ * per route and dictation outlives them, so this cannot be per-instance: a
+ * composer that mounts with the control already hidden still has to stop the
+ * microphone, and one that mounts before its settings resolve must not.
+ */
+const dictationWasOfferedRef = { current: false };
 
 export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps) {
   const {
@@ -1768,6 +1804,338 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       promptRef,
       setPrompt,
     ],
+  );
+
+  // Span bookkeeping, command matching and anchor arithmetic live in
+  // client-runtime, where they are unit tested; this only applies the edits.
+  // Voice reaches app commands by pressing their shortcut, so it reads the
+  // same resolved bindings the keyboard does.
+  const voiceKeybindings = useAtomValue(primaryServerKeybindingsAtom);
+  const voiceDraftRef = useRef<VoiceDraftState>(initialVoiceDraftState);
+  const [voiceProvisional, setVoiceProvisional] = useState<{
+    start: number;
+    end: number;
+  } | null>(null);
+  // A command counting down in place: the phrase stays in the draft, styled,
+  // until it fires. `nonce` restarts the countdown for a repeated command.
+  const [voiceCommandRange, setVoiceCommandRange] = useState<{
+    pending: VoicePendingVoiceCommand;
+    nonce: number;
+  } | null>(null);
+  const voiceControlsRef = useRef<{
+    stop: () => void;
+    cancel: () => void;
+    restart: () => void;
+  } | null>(null);
+  // Restarts the countdown when the same command is heard twice in a row.
+  const voiceCommandNonceRef = useRef(0);
+  // Voice writes reach the editor a render later, so history work hops a frame
+  // first, as `applyPromptReplacement` does before moving the caret. Acting
+  // sooner loses to the controlled sync, which rewrites the text.
+  const scheduleHistoryStep = useCallback((run: (editor: ComposerPromptEditorHandle) => void) => {
+    window.requestAnimationFrame(() => {
+      const editor = composerEditorRef.current;
+      if (editor !== null) run(editor);
+    });
+  }, []);
+
+  // `history` is how the batch joins the undo stack. Voice writes are
+  // `historic`; a completed utterance is recorded separately.
+  const applyVoiceEdits = useCallback(
+    (edits: ReadonlyArray<VoiceDraftEdit>, history: ComposerHistoryMode): boolean => {
+      for (const edit of edits) {
+        const applied = applyPromptReplacement(edit.start, edit.end, edit.text, {
+          ...(edit.expectedText === undefined ? {} : { expectedText: edit.expectedText }),
+          focusEditorAfterReplace: false,
+        });
+        if (!applied) return false;
+      }
+      // One React commit per batch, so the editor syncs once and the tag
+      // describes the net change rather than any single edit.
+      composerEditorRef.current?.setNextValueHistory(history, promptRef.current);
+      return true;
+    },
+    [applyPromptReplacement, promptRef],
+  );
+
+  // Takes the pending command it was scheduled with, so a transcript arriving
+  // in between can never leave the countdown firing against empty state.
+  const runVoiceCommand = useCallback(
+    (pending: VoicePendingVoiceCommand) => {
+      const resolved = resolveVoiceCommand(
+        { ...voiceDraftRef.current, pending },
+        promptRef.current,
+      );
+      setVoiceCommandRange(null);
+      if (!applyVoiceEdits(resolved.edits, resolved.history)) {
+        voiceDraftRef.current = cancelVoiceCommand(voiceDraftRef.current);
+        return;
+      }
+      voiceDraftRef.current = resolved.state;
+      setVoiceProvisional(null);
+      // The command rewrote the draft, so the session accumulating it no longer
+      // describes anything on screen; its next reply would re-insert all of it.
+      if (resolved.action !== "stop") {
+        voiceControlsRef.current?.restart();
+      }
+      if (resolved.action === "send") {
+        // Dictation keeps running: the next utterance starts a fresh draft.
+        onSend();
+      } else if (resolved.action === "stop") {
+        voiceControlsRef.current?.stop();
+      } else if (resolved.action === "undo" || resolved.action === "redo") {
+        const stepping = resolved.action;
+        scheduleHistoryStep((editor) => {
+          if (stepping === "undo") editor.undo();
+          else editor.redo();
+          // The draft moved underneath, so the next utterance re-anchors on it.
+          voiceDraftRef.current = voiceDraftStateAt(
+            editor.readSnapshot().cursor,
+            voiceDraftRef.current.sealedUtteranceId,
+          );
+        });
+      } else if (resolved.action === "keybinding") {
+        // Pressed on the app's behalf once the phrase is gone, so a handler that
+        // reads the draft sees it without the words that triggered this.
+        const command = pending.keybinding;
+        scheduleHistoryStep(() => {
+          if (command === undefined) return;
+          // Nothing to press when the command has no shortcut on this
+          // platform. The phrase is already gone by then, so staying silent
+          // would read as the countdown having done nothing at all.
+          if (!pressShortcutForCommand(voiceKeybindings, command)) {
+            toastManager.add({
+              type: "info",
+              title: "That app command has no keyboard shortcut.",
+              description: "Give it one in Settings → Keybindings to run it by voice.",
+            });
+          }
+        });
+      } else if (resolved.action !== null) {
+        // A caret move: the draft already says where to go, and the next
+        // utterance is anchored there, so the editor just follows it.
+        const caret = resolved.state.insertAt;
+        scheduleHistoryStep((editor) => editor.focusAt(caret));
+      }
+    },
+    [applyVoiceEdits, onSend, promptRef, scheduleHistoryStep, voiceKeybindings],
+  );
+  // In a ref so a changing prop identity cannot restart the countdown timer.
+  const runVoiceCommandRef = useRef(runVoiceCommand);
+  useEffect(() => {
+    runVoiceCommandRef.current = runVoiceCommand;
+  }, [runVoiceCommand]);
+
+  const handleDictationTranscript = useCallback(
+    (text: string, isFinal: boolean, utteranceId: number) => {
+      // Speaking again takes back a counting-down command, but the silence
+      // between utterances arrives here too and must leave it running.
+      if (text.trim().length > 0) {
+        setVoiceCommandRange(null);
+      }
+      // A new utterance lands at the caret as it is now, not where it was when
+      // the mic opened or when the last one ended.
+      const draft = voiceDraftRef.current;
+      const anchored =
+        draft.span === null
+          ? {
+              ...draft,
+              insertAt: composerEditorRef.current?.readSnapshot().cursor ?? draft.insertAt,
+            }
+          : draft;
+      const result = applyVoiceTranscript(anchored, {
+        prompt: promptRef.current,
+        transcript: text,
+        isFinal,
+        utteranceId,
+        commands: withMissingVoiceCommands(settings.voiceDictationCommands),
+      });
+      if (!applyVoiceEdits(result.edits, result.history)) {
+        // The span is no longer what this utterance wrote — the user edited
+        // inside it, or the draft changed underneath on a thread switch. Hand
+        // the text over and start a fresh session rather than switching the
+        // microphone off, which the user never asked for.
+        voiceDraftRef.current = abandonVoiceUtterance(voiceDraftRef.current, draft.insertAt);
+        setVoiceProvisional(null);
+        voiceControlsRef.current?.restart();
+        return;
+      }
+      voiceDraftRef.current = result.state;
+      setVoiceProvisional(voiceProvisionalRange(result.state));
+      // One undo step for the finished utterance, recorded once its text has
+      // reached the editor so the step lands on the right state.
+      if (result.completed) scheduleHistoryStep((editor) => editor.pushHistory());
+
+      const pending = result.state.pending;
+      if (pending === null) return;
+      if (pending.delayMs <= 0) {
+        runVoiceCommandRef.current(pending);
+        return;
+      }
+      setVoiceCommandRange({ pending, nonce: voiceCommandNonceRef.current++ });
+    },
+    [applyVoiceEdits, promptRef, settings.voiceDictationCommands],
+  );
+
+  const voiceDictation = useVoiceDictationSession(handleDictationTranscript);
+  useEffect(() => {
+    voiceControlsRef.current = {
+      stop: voiceDictation.stop,
+      cancel: voiceDictation.cancel,
+      restart: voiceDictation.restartUtterance,
+    };
+  }, [voiceDictation.cancel, voiceDictation.restartUtterance, voiceDictation.stop]);
+
+  // Both ranges are styled by the editor, which needs the matching text
+  // first — hence effects rather than calls inside the handler.
+  useEffect(() => {
+    composerEditorRef.current?.setProvisionalRange(voiceProvisional);
+  }, [voiceProvisional, prompt]);
+  useEffect(() => {
+    composerEditorRef.current?.setCommandRange(
+      voiceCommandRange === null
+        ? null
+        : { start: voiceCommandRange.pending.start, end: voiceCommandRange.pending.end },
+    );
+  }, [voiceCommandRange, prompt]);
+
+  useEffect(() => {
+    if (voiceCommandRange === null) return;
+    const pending = voiceCommandRange.pending;
+    const timer = window.setTimeout(() => runVoiceCommandRef.current(pending), pending.delayMs);
+    return () => window.clearTimeout(timer);
+  }, [voiceCommandRange]);
+
+  // Typing or clicking hands the draft back: drop the current utterance rather
+  // than rewrite text the user is editing.
+  const handleComposerUserInput = useCallback(() => {
+    if (voiceDictation.status === "idle") return;
+    // A command counting down has no open span — it arrived on a final — so
+    // the span check must not gate this, or typing during the grace window
+    // leaves the command to fire later against offsets that have moved.
+    const pending = voiceDraftRef.current.pending;
+    if (voiceDraftRef.current.span === null && pending === null) return;
+    setVoiceCommandRange(null);
+    voiceDraftRef.current = cancelVoiceCommand(voiceDraftRef.current);
+    setVoiceProvisional(null);
+    // The anchor is read from the caret when the next utterance arrives.
+    voiceDraftRef.current = abandonVoiceUtterance(
+      voiceDraftRef.current,
+      voiceDraftRef.current.insertAt,
+    );
+    voiceDictation.restartUtterance();
+  }, [promptRef, voiceDictation]);
+
+  // The mic button is the only control, so dictation must not outlive it: a
+  // pending user input replaces the composer actions, and the setting can be
+  // turned off mid-utterance. Either would otherwise leave the microphone open
+  // with nothing on screen to close it.
+  // Environments differ: the connected server may have no whisper sidecar for
+  // its platform, and offering a mic that can only fail is worse than showing
+  // none. Undefined means the 5 s-cached status has not answered yet, which
+  // must not hide the control on every fresh connection.
+  const voiceStatus = useEnvironmentQuery(
+    settings.voiceDictationEnabled ? voiceEnvironment.status({ environmentId, input: {} }) : null,
+  );
+  const canDictate =
+    settings.voiceDictationEnabled &&
+    pendingUserInputs.length === 0 &&
+    voiceStatus.data?.supported !== false;
+  useEffect(() => {
+    if (canDictate) {
+      dictationWasOfferedRef.current = true;
+      return;
+    }
+    // Only once the control has been offered at all: a composer can read the
+    // setting before it resolves, and stopping on that would end dictation on
+    // every navigation. The flag outlives the composer, so a thread whose
+    // composer mounts already-hidden still stops the microphone.
+    if (!dictationWasOfferedRef.current || voiceDictation.status === "idle") return;
+    voiceDictation.stop();
+  }, [canDictate, voiceDictation]);
+
+  // Dictation outlives the composer — the session lives above the routes, so
+  // switching threads keeps the mic open. The utterance in flight belongs to
+  // the draft that was on screen when it was spoken, though, so it is dropped
+  // rather than finishing into this one.
+  useEffect(() => {
+    if (voiceDictation.status === "idle") return;
+    voiceDictation.restartUtterance();
+    // Mount only: later restarts are driven by typing and by commands.
+  }, []);
+
+  const startDictation = useCallback(() => {
+    setVoiceCommandRange(null);
+    // The draft as it stands is what the first completed utterance undoes to.
+    composerEditorRef.current?.anchorHistory();
+    // Dictation lands where the caret is, not always at the end.
+    voiceDraftRef.current = voiceDraftStateAt(
+      composerEditorRef.current?.readSnapshot().cursor ?? promptRef.current.length,
+      voiceDraftRef.current.sealedUtteranceId,
+    );
+    setVoiceProvisional(null);
+    void voiceDictation.start({
+      environmentId,
+      model: settings.voiceDictationModel,
+      language: settings.voiceDictationLanguage,
+    });
+  }, [
+    environmentId,
+    promptRef,
+    settings.voiceDictationLanguage,
+    settings.voiceDictationModel,
+    voiceDictation,
+  ]);
+
+  const handleToggleDictation = useCallback(() => {
+    if (voiceDictation.status !== "idle") {
+      setVoiceCommandRange(null);
+      voiceDictation.stop();
+      return;
+    }
+    startDictation();
+  }, [startDictation, voiceDictation]);
+
+  // The mic button is both a toggle and a push-to-talk control: a tap latches
+  // dictation on, while holding it past the threshold dictates only for as
+  // long as the button is held.
+  const dictationPressRef = useRef<{ at: number; startedHere: boolean } | null>(null);
+  const handleDictationPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      // Primary button only: a right-click belongs to the context menu.
+      if (event.button !== 0) return;
+      // Keep the caret in the draft; the insertion point is read on press.
+      event.preventDefault();
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      const startedHere = voiceDictation.status === "idle";
+      dictationPressRef.current = { at: performance.now(), startedHere };
+      // Someone holding the button is already talking; keep every sample so
+      // the gate can catch up without the opening words being trimmed away.
+      voiceDictation.setRetainingAudio(true);
+      if (startedHere) {
+        startDictation();
+      }
+    },
+    [startDictation, voiceDictation],
+  );
+  const handleDictationPointerUp = useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      // A non-primary release is not ours; pointercancel reports no button and
+      // must always let go.
+      if (event.type === "pointerup" && event.button !== 0) return;
+      voiceDictation.setRetainingAudio(false);
+      const press = dictationPressRef.current;
+      dictationPressRef.current = null;
+      if (press === null) return;
+      const heldFor = performance.now() - press.at;
+      // Held long enough to read as push-to-talk, or a tap that closes a
+      // session the press did not open.
+      if (heldFor >= PUSH_TO_TALK_HOLD_MS || !press.startedHere) {
+        setVoiceCommandRange(null);
+        voiceDictation.stop();
+      }
+    },
+    [voiceDictation],
   );
 
   const readComposerSnapshot = useCallback((): {
@@ -3398,7 +3766,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   </div>
                 )}
 
-              <div className="relative">
+              {/* Real user input, not value changes: programmatic dictation
+                  edits also flow through onChange, so only keyboard and
+                  pointer events can tell that the user has taken over. */}
+              <div
+                className="relative"
+                onKeyDownCapture={handleComposerUserInput}
+                onPointerDownCapture={handleComposerUserInput}
+              >
                 <ComposerPromptEditor
                   editorRef={composerEditorRef}
                   value={
@@ -3474,6 +3849,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             <ComposerPromptLengthValidation
               message={providerInputSubmissionError ?? composerSubmissionError}
             />
+
+            {/* A dictation failure has to be readable, not just hoverable: the
+                mic's tooltip never opens on a touch device, which is where a
+                denied microphone is most likely. */}
+            {canDictate && voiceDictation.status === "idle" && voiceDictation.error !== null ? (
+              <p className="mx-4 mb-2 text-xs text-destructive" role="alert">
+                {voiceDictation.error}
+              </p>
+            ) : null}
 
             {/* Bottom toolbar */}
             {isComposerCollapsedMobile || isComposerApprovalState ? null : (
@@ -3570,6 +3954,56 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 >
                   {showMobilePendingAnswerActions ? null : inlineTasksBadge}
                   {showMobilePendingAnswerActions ? null : inlineStashBadge}
+                  {canDictate ? (
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <ComposerControl
+                            className={cn(
+                              "shrink-0",
+                              voiceDictation.status !== "idle"
+                                ? "bg-accent text-accent-foreground hover:bg-accent/80"
+                                : "text-secondary-label hover:text-foreground",
+                            )}
+                            type="button"
+                            disabled={isConnecting || projectSelectionRequired}
+                            // Keep the caret in the draft: a focus change here
+                            // would move the insertion point out from under
+                            // the utterance about to be dictated.
+                            onPointerDown={handleDictationPointerDown}
+                            onPointerUp={handleDictationPointerUp}
+                            onPointerCancel={handleDictationPointerUp}
+                            // Pointer presses are handled above; this catches
+                            // keyboard activation, which reports no detail.
+                            onClick={(event: React.MouseEvent) => {
+                              if (event.detail === 0) handleToggleDictation();
+                            }}
+                            aria-label={
+                              voiceDictation.status === "idle"
+                                ? "Start dictation, or hold to talk"
+                                : "Stop dictation"
+                            }
+                          />
+                        }
+                      >
+                        {voiceDictation.status !== "idle" ? (
+                          <VoiceMicIndicator
+                            getActivity={voiceDictation.getActivity}
+                            status={voiceDictation.status}
+                          />
+                        ) : (
+                          <ComposerControlIcon icon={MicIcon} />
+                        )}
+                      </TooltipTrigger>
+                      <TooltipPopup side="top">
+                        {voiceDictation.error !== null
+                          ? voiceDictation.error
+                          : voiceDictation.status === "idle"
+                            ? "Dictate — tap to keep listening, or hold to talk"
+                            : "Stop dictation"}
+                      </TooltipPopup>
+                    </Tooltip>
+                  ) : null}
                   <ComposerFooterPrimaryActions
                     compact={isComposerPrimaryActionsCompact}
                     activeContextWindow={activeContextWindow}

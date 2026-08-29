@@ -67,6 +67,10 @@ function makeFakeBrowserWindow() {
   const webContents = {
     copyImageAt: vi.fn(),
     getURL: vi.fn(() => "t3code-dev://app/"),
+    session: {
+      setPermissionRequestHandler: vi.fn(),
+      setPermissionCheckHandler: vi.fn(),
+    },
     getZoomLevel: vi.fn(() => zoomLevel),
     setZoomLevel: vi.fn((level: number) => {
       zoomLevel = level;

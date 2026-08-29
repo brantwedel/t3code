@@ -2521,3 +2521,50 @@ code {
     transform: scaleX(0.9);
   }
 }
+
+/* Voice text the recognizer is still revising. Rendered through Lexical's
+   italic format (a plain <em>, no user-agent styling of its own) and washed
+   with the accent so it reads as live rather than dimmed-out placeholder. */
+.composer-voice-provisional {
+  font-style: normal;
+  color: inherit;
+  background: color-mix(in oklab, var(--primary) 18%, transparent);
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* A recognised voice command, counting down in place: the fill drains off the
+   words themselves so the wait is visible where it happens, with no extra row
+   in the composer. Rendered through the underline format, whose decoration we
+   drop — the fill is the whole cue. */
+@keyframes composer-voice-command-drain {
+  from {
+    background-size: 100% 100%;
+  }
+  to {
+    background-size: 0% 100%;
+  }
+}
+
+.composer-voice-command {
+  color: inherit;
+  text-decoration: none;
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  background-image: linear-gradient(
+    color-mix(in oklab, var(--primary) 45%, transparent),
+    color-mix(in oklab, var(--primary) 45%, transparent)
+  );
+  background-repeat: no-repeat;
+  background-position: left center;
+  animation: composer-voice-command-drain 1500ms linear forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-voice-command {
+    animation: none;
+    background-size: 100% 100%;
+  }
+}

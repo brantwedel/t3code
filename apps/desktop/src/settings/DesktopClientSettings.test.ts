@@ -50,6 +50,15 @@ const clientSettings: ClientSettings = {
   sidebarThreadPreviewCount: 6,
   legacySidebarEnabled: false,
   timestampFormat: "24-hour",
+  voiceDictationCommands: [
+    { action: "send", phrases: ["send message", "send it"], delayMs: 1500 },
+    { action: "clear", phrases: ["clear message", "scratch that"], delayMs: 0 },
+    { action: "stop", phrases: ["stop dictation", "stop listening"], delayMs: 0 },
+    { action: "newLine", phrases: ["new line", "new paragraph"], delayMs: 0 },
+  ],
+  voiceDictationEnabled: false,
+  voiceDictationLanguage: "",
+  voiceDictationModel: "base.en",
   wordWrap: true,
 };
 

@@ -146,6 +146,39 @@ function resourceMonitorBinaryName(platform: NodeJS.Platform): string {
   return platform === "win32" ? "t3-resource-monitor.exe" : "t3-resource-monitor";
 }
 
+function whisperBinaryName(platform: NodeJS.Platform): string {
+  return platform === "win32" ? "t3-whisper.exe" : "t3-whisper";
+}
+
+/**
+ * The whisper sidecar is staged beside the resource monitor and found the same
+ * way. The server cannot locate it on its own: in a packaged build it runs from
+ * inside the asar, and the binary is staged outside it.
+ */
+const resolveWhisperPath = Effect.fn("desktop.backendConfiguration.resolveWhisperPath")(
+  function* () {
+    const environment = yield* DesktopEnvironment.DesktopEnvironment;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const binaryName = whisperBinaryName(environment.platform);
+    const candidates = environment.isDevelopment
+      ? [
+          environment.path.join(environment.rootDir, "native/whisper/target/release", binaryName),
+          environment.path.join(environment.rootDir, "native/whisper/target/debug", binaryName),
+        ]
+      : environment.isPackaged
+        ? [environment.path.join(environment.resourcesPath, "whisper", binaryName)]
+        : environment.resolveResourcePathCandidates(environment.path.join("whisper", binaryName));
+
+    for (const candidate of candidates) {
+      if (yield* fileSystem.exists(candidate).pipe(Effect.orElseSucceed(() => false))) {
+        return Option.some(candidate);
+      }
+    }
+
+    return Option.none<string>();
+  },
+);
+
 const resolveResourceMonitorPath = Effect.fn(
   "desktop.backendConfiguration.resolveResourceMonitorPath",
 )(function* () {
@@ -471,6 +504,7 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
   function* (
     input: SharedBootstrapInput & {
       readonly resourceMonitorPath: Option.Option<string>;
+      readonly whisperPath: Option.Option<string>;
     },
   ): Effect.fn.Return<
     DesktopBackendManager.DesktopBackendStartConfig,
@@ -495,6 +529,10 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       ...Option.match(input.resourceMonitorPath, {
         onNone: () => ({}),
         onSome: (resourceMonitorPath) => ({ resourceMonitorPath }),
+      }),
+      ...Option.match(input.whisperPath, {
+        onNone: () => ({}),
+        onSome: (whisperPath) => ({ whisperPath }),
       }),
       ...buildObservabilityFragment(input.observabilitySettings),
     };
@@ -809,7 +847,11 @@ export const make = Effect.gen(function* () {
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
     );
-    return yield* resolvePrimaryStartConfig({ ...shared, resourceMonitorPath }).pipe(
+    const whisperPath = yield* resolveWhisperPath().pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
+    );
+    return yield* resolvePrimaryStartConfig({ ...shared, resourceMonitorPath, whisperPath }).pipe(
       Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
       Effect.provideService(DesktopServerExposure.DesktopServerExposure, serverExposure),
     );

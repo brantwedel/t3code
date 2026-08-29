@@ -11,6 +11,7 @@ This is a living glossary for T3 Code. It explains what common terms mean in thi
 - [Orchestration](#orchestration)
 - [Provider runtime](#provider-runtime)
 - [Checkpointing](#checkpointing)
+- [Voice dictation](#voice-dictation)
 
 ## Concepts
 
@@ -144,6 +145,26 @@ The patch difference between two checkpoints. Query logic lives in [CheckpointDi
 
 The file patch and changed-file summary for one turn. It is usually computed in [CheckpointDiffQuery.ts][20], represented in [the contracts][1], and recorded into thread state by [projector.ts][4].
 
+### Voice dictation
+
+#### Utterance
+
+One stretch of speech between silences. A client opens a transcription session per utterance and
+finalizes it when the voice gate closes, so an utterance is also the unit the draft treats as a
+single undo step. See [voice-transcription.md][30].
+
+#### Sealing
+
+The sidecar re-transcribes its live audio window on every append. Sealing commits segments that end
+well behind the live edge, drops their audio, and carries a tail of their text forward as
+vocabulary context — bounding the work per append without changing what clients see.
+
+#### Voice command
+
+A configured phrase that acts on the draft or the app instead of being typed. It matches only when
+it ends a finalized utterance, and by default counts down in place first so continuing to speak
+takes it back. See [voice-dictation.md][31].
+
 ## Practical Shortcuts
 
 - If you see `requested`, think "intent recorded".
@@ -183,3 +204,5 @@ The file patch and changed-file summary for one turn. It is usually computed in 
 [22]: ../../apps/server/src/checkpointing/Utils.ts
 [23]: ../../apps/server/src/checkpointing/Diffs.ts
 [24]: ./overview.md
+[30]: ./voice-transcription.md
+[31]: ../user/voice-dictation.md

@@ -109,6 +109,10 @@ import * as NativeTelemetryClient from "./resourceTelemetry/NativeTelemetryClien
 import * as ResourceAttribution from "./resourceTelemetry/ResourceAttribution.ts";
 import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinary.ts";
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
+import * as VoiceModelStore from "./voice/VoiceModelStore.ts";
+import * as VoiceTranscription from "./voice/VoiceTranscription.ts";
+import * as WhisperBinary from "./voice/WhisperBinary.ts";
+import * as WhisperSidecarClient from "./voice/WhisperSidecarClient.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
@@ -176,6 +180,13 @@ const ResourceDiagnosticsLayerLive = Layer.mergeAll(
   ResourceTelemetryLayerLive,
   ProcessDiagnostics.layer.pipe(Layer.provide(ResourceTelemetryLayerLive)),
   ProcessResourceMonitor.layer.pipe(Layer.provide(ResourceTelemetryLayerLive)),
+);
+
+const WhisperBinaryLayerLive = WhisperBinary.layer;
+const VoiceLayerLive = VoiceTranscription.layer.pipe(
+  Layer.provide(WhisperSidecarClient.layer.pipe(Layer.provide(WhisperBinaryLayerLive))),
+  Layer.provide(VoiceModelStore.layer),
+  Layer.provide(WhisperBinaryLayerLive),
 );
 
 const RelayClientLive = Layer.unwrap(
@@ -427,6 +438,7 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   // Misc.
   Layer.provideMerge(BackgroundLayerLive),
   Layer.provideMerge(ResourceDiagnosticsLayerLive),
+  Layer.provideMerge(VoiceLayerLive),
   Layer.provideMerge(UsageLayerLive),
   Layer.provideMerge(TraceDiagnostics.layer),
   Layer.provideMerge(AnalyticsService.layer),

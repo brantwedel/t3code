@@ -546,6 +546,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "!apps/desktop/prod-resources/windows-server/**/*",
       "!apps/desktop/prod-resources/wsl-runtime.tar.gz",
       "!apps/desktop/prod-resources/wsl-runtime.tar.gz.sha256",
+      "!apps/desktop/prod-resources/whisper",
+      "!apps/desktop/prod-resources/whisper/**/*",
     ]);
     assert.equal(WINDOWS_SERVER_RESOURCE_SOURCE_DIR, "apps/desktop/prod-resources/windows-server");
     assert.deepStrictEqual(WINDOWS_SERVER_EXTRA_RESOURCES, [
@@ -609,6 +611,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           from: "apps/desktop/prod-resources/resource-monitor",
           to: "resource-monitor",
         },
+        {
+          from: "apps/desktop/prod-resources/whisper",
+          to: "whisper",
+        },
         ...WINDOWS_SERVER_EXTRA_RESOURCES,
         ...WSL_RUNTIME_EXTRA_RESOURCES,
       ]);
@@ -618,6 +624,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         {
           from: "apps/desktop/prod-resources/resource-monitor",
           to: "resource-monitor",
+        },
+        {
+          from: "apps/desktop/prod-resources/whisper",
+          to: "whisper",
         },
         ...WINDOWS_SERVER_EXTRA_RESOURCES,
       ]);
@@ -1301,6 +1311,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
+    // This plist replaces electron-builder's default, which is where the
+    // microphone entitlement would otherwise come from; without it a signed,
+    // hardened-runtime build is denied audio input and dictation never prompts.
+    assert.include(entitlements, "<key>com.apple.security.device.audio-input</key>");
   });
 
   it("rejects incomplete macOS passkey signing configuration", () => {
@@ -1440,11 +1454,15 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
-  it("stages the resource monitor as an external executable resource", () => {
+  it("stages the native sidecars as external executable resources", () => {
     assert.deepStrictEqual(DESKTOP_EXTRA_RESOURCES, [
       {
         from: "apps/desktop/prod-resources/resource-monitor",
         to: "resource-monitor",
+      },
+      {
+        from: "apps/desktop/prod-resources/whisper",
+        to: "whisper",
       },
     ]);
     assert.deepStrictEqual(resolveResourceMonitorRustTargets("mac", "universal"), [

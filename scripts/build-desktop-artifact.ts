@@ -132,6 +132,10 @@ export function resourceMonitorExecutableName(platform: typeof BuildPlatform.Typ
   return platform === "win" ? "t3-resource-monitor.exe" : "t3-resource-monitor";
 }
 
+export function whisperExecutableName(platform: typeof BuildPlatform.Type): string {
+  return platform === "win" ? "t3-whisper.exe" : "t3-whisper";
+}
+
 const PLATFORM_CONFIG: Record<typeof BuildPlatform.Type, PlatformConfig> = {
   mac: {
     cliFlag: "--mac",
@@ -286,6 +290,16 @@ export class BuildCommandFailedError extends Schema.TaggedErrorClass<BuildComman
     return `Command exited with non-zero exit code (${this.exitCode})${outputSuffix}`;
   }
 }
+
+export class WhisperBuildOutputMissingError extends Schema.TaggedErrorClass<WhisperBuildOutputMissingError>()(
+  "WhisperBuildOutputMissingError",
+  {
+    binaryPath: Schema.String,
+    rustTarget: Schema.String,
+    platform: BuildPlatform,
+    arch: BuildArch,
+  },
+) {}
 
 export class ResourceMonitorBuildOutputMissingError extends Schema.TaggedErrorClass<ResourceMonitorBuildOutputMissingError>()(
   "ResourceMonitorBuildOutputMissingError",
@@ -806,6 +820,11 @@ export const DESKTOP_FILE_EXCLUSIONS = [
   "!apps/desktop/prod-resources/windows-server/**/*",
   "!apps/desktop/prod-resources/wsl-runtime.tar.gz",
   "!apps/desktop/prod-resources/wsl-runtime.tar.gz.sha256",
+  // Same reason for whisper, which is large enough that a second copy inside
+  // app.asar is worth avoiding: extraResources emits it once at resources/,
+  // and it is only ever spawned from there.
+  "!apps/desktop/prod-resources/whisper",
+  "!apps/desktop/prod-resources/whisper/**/*",
 ] as const;
 // Windows terminal helpers cannot run on macOS and slow signing and notarization.
 export const MAC_FILE_EXCLUSIONS = [
@@ -914,6 +933,10 @@ export const DESKTOP_EXTRA_RESOURCES = [
   {
     from: "apps/desktop/prod-resources/resource-monitor",
     to: "resource-monitor",
+  },
+  {
+    from: "apps/desktop/prod-resources/whisper",
+    to: "whisper",
   },
 ] as const;
 
@@ -1128,6 +1151,8 @@ ${associatedDomains}
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
     <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
     <true/>
   </dict>
 </plist>
@@ -1817,6 +1842,88 @@ export const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* 
   }
 });
 
+/**
+ * Builds and stages the whisper sidecar next to the resource monitor. Kept
+ * separate because whisper links whisper.cpp and takes far longer to build, so
+ * its cache and reuse switch are its own.
+ */
+export const stageWhisper = Effect.fn("stageWhisper")(function* (input: {
+  readonly repoRoot: string;
+  readonly stageResourcesDir: string;
+  readonly platform: typeof BuildPlatform.Type;
+  readonly arch: typeof BuildArch.Type;
+  readonly verbose: boolean;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const manifestPath = path.join(input.repoRoot, "native/whisper/Cargo.toml");
+  const executableName = whisperExecutableName(input.platform);
+  const rustTargets = resolveResourceMonitorRustTargets(input.platform, input.arch);
+  const reuseWhisper = yield* Config.boolean("T3CODE_DESKTOP_REUSE_WHISPER").pipe(
+    Config.withDefault(false),
+  );
+  const builtBinaries: string[] = [];
+
+  for (const rustTarget of rustTargets) {
+    if (!reuseWhisper) {
+      const spawnCommand = yield* resolveSpawnCommand("cargo", [
+        "build",
+        "--locked",
+        "--release",
+        "--manifest-path",
+        manifestPath,
+        "--target",
+        rustTarget,
+      ]);
+      yield* runCommand(
+        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+          cwd: input.repoRoot,
+          shell: spawnCommand.shell,
+        }),
+        { label: `cargo build whisper (${rustTarget})`, verbose: input.verbose },
+      );
+    }
+
+    const binaryPath = path.join(
+      input.repoRoot,
+      "native/whisper/target",
+      rustTarget,
+      "release",
+      executableName,
+    );
+    if (!(yield* fs.exists(binaryPath))) {
+      return yield* new WhisperBuildOutputMissingError({
+        binaryPath,
+        rustTarget,
+        platform: input.platform,
+        arch: input.arch,
+      });
+    }
+    if (reuseWhisper) {
+      yield* Effect.log(`[desktop-artifact] Reusing cached whisper (${rustTarget}).`);
+    }
+    builtBinaries.push(binaryPath);
+  }
+
+  const destinationDirectory = path.join(input.stageResourcesDir, "whisper");
+  const destinationPath = path.join(destinationDirectory, executableName);
+  yield* fs.remove(destinationDirectory, { recursive: true, force: true }).pipe(Effect.ignore);
+  yield* fs.makeDirectory(destinationDirectory, { recursive: true });
+
+  if (builtBinaries.length === 1) {
+    yield* fs.copyFile(builtBinaries[0]!, destinationPath);
+  } else {
+    yield* runCommand(
+      ChildProcess.make("lipo", ["-create", ...builtBinaries, "-output", destinationPath]),
+      { label: "lipo whisper universal binary", verbose: input.verbose },
+    );
+  }
+
+  if (input.platform !== "win") {
+    yield* fs.chmod(destinationPath, 0o755);
+  }
+});
+
 function generateMacIconSet(
   sourcePng: string,
   targetIcns: string,
@@ -2187,6 +2294,14 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           schemes: ["t3code", "t3code-dev"],
         },
       ],
+      // Without a usage string macOS terminates the app the first time voice
+      // dictation reaches the microphone, rather than prompting. A dev run
+      // inherits Electron's own plist, so this only shows up in a packaged
+      // build.
+      extendInfo: {
+        NSMicrophoneUsageDescription:
+          "T3 Code uses the microphone for voice dictation. Your speech is transcribed on the server you are connected to.",
+      },
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
       ...(macPasskeySigning
         ? {
@@ -3092,6 +3207,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
   }
   yield* stageResourceMonitor({
+    repoRoot,
+    stageResourcesDir,
+    platform: options.platform,
+    arch: options.arch,
+    verbose: options.verbose,
+  });
+  yield* stageWhisper({
     repoRoot,
     stageResourcesDir,
     platform: options.platform,

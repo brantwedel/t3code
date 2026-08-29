@@ -271,6 +271,39 @@ export function shortcutLabelForCommand(
   return shortcut ? formatShortcutLabel(shortcut, platform) : null;
 }
 
+/**
+ * Press a command's shortcut on the app's behalf.
+ *
+ * Commands have no central dispatcher — each feature listens for keydown and
+ * resolves the event itself — so voice reaches them the same way the keyboard
+ * does, by dispatching the binding they already answer to. Anything bound is
+ * therefore reachable, and new commands need no wiring here.
+ *
+ * Returns false when the command has no shortcut on this platform.
+ */
+export function pressShortcutForCommand(
+  keybindings: ResolvedKeybindingsConfig,
+  command: KeybindingCommand,
+  options?: ResolvedShortcutLabelOptions,
+): boolean {
+  const platform = resolvePlatform(options);
+  const shortcut = findEffectiveShortcutForCommand(keybindings, command, options);
+  if (!shortcut) return false;
+  const useMetaForMod = isMacPlatform(platform);
+  window.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: shortcut.key,
+      metaKey: shortcut.metaKey || (shortcut.modKey && useMetaForMod),
+      ctrlKey: shortcut.ctrlKey || (shortcut.modKey && !useMetaForMod),
+      shiftKey: shortcut.shiftKey,
+      altKey: shortcut.altKey,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  return true;
+}
+
 export function threadJumpCommandForIndex(index: number): ThreadJumpKeybindingCommand | null {
   return THREAD_JUMP_KEYBINDING_COMMANDS[index] ?? null;
 }

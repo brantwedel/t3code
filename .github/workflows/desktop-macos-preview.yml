@@ -61,8 +61,15 @@ jobs:
           path: native/resource-monitor/target/aarch64-apple-darwin/release/t3-resource-monitor
           key: resource-monitor-aarch64-apple-darwin-${{ hashFiles('native/resource-monitor/Cargo.lock', 'native/resource-monitor/Cargo.toml', 'native/resource-monitor/src/**') }}
 
+      - name: Cache whisper
+        id: whisper_cache
+        uses: actions/cache@v6
+        with:
+          path: native/whisper/target/aarch64-apple-darwin/release/t3-whisper
+          key: whisper-aarch64-apple-darwin-${{ hashFiles('native/whisper/Cargo.lock', 'native/whisper/Cargo.toml', 'native/whisper/src/**') }}
+
       - name: Setup Rust
-        if: steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        if: steps.resource_monitor_cache.outputs.cache-hit != 'true' || steps.whisper_cache.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
@@ -87,6 +94,7 @@ jobs:
         shell: bash
         env:
           T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: ${{ steps.resource_monitor_cache.outputs.cache-hit == 'true' }}
+          T3CODE_DESKTOP_REUSE_WHISPER: ${{ steps.whisper_cache.outputs.cache-hit == 'true' }}
           PREVIEW_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail

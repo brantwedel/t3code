@@ -23,6 +23,13 @@ import {
   ProviderInstanceId,
   type ProviderDriverKind,
 } from "./providerInstance.ts";
+import {
+  DEFAULT_VOICE_COMMANDS,
+  MAX_VOICE_COMMANDS_COUNT,
+  DEFAULT_VOICE_MODEL,
+  VoiceCommandSetting,
+  VoiceModelId,
+} from "./voice.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -254,6 +261,14 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   timestampFormat: TimestampFormat.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_TIMESTAMP_FORMAT)),
+  ),
+  voiceDictationCommands: Schema.Array(VoiceCommandSetting)
+    .check(Schema.isMaxLength(MAX_VOICE_COMMANDS_COUNT))
+    .pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_VOICE_COMMANDS))),
+  voiceDictationEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  voiceDictationLanguage: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  voiceDictationModel: VoiceModelId.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_VOICE_MODEL)),
   ),
   wordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
@@ -953,6 +968,12 @@ export const ClientSettingsPatch = Schema.Struct({
   sidebarThreadSortOrder: Schema.optionalKey(SidebarThreadSortOrder),
   sidebarThreadPreviewCount: Schema.optionalKey(SidebarThreadPreviewCount),
   timestampFormat: Schema.optionalKey(TimestampFormat),
+  voiceDictationCommands: Schema.optionalKey(
+    Schema.Array(VoiceCommandSetting).check(Schema.isMaxLength(MAX_VOICE_COMMANDS_COUNT)),
+  ),
+  voiceDictationEnabled: Schema.optionalKey(Schema.Boolean),
+  voiceDictationLanguage: Schema.optionalKey(TrimmedString),
+  voiceDictationModel: Schema.optionalKey(VoiceModelId),
   wordWrap: Schema.optionalKey(Schema.Boolean),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

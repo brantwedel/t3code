@@ -145,6 +145,7 @@ import {
   useSettingsSearchTargetId,
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+import { VoiceDictationSection } from "./VoiceDictationSettings";
 import { ProjectFavicon } from "../ProjectFavicon";
 
 const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
@@ -2522,6 +2523,8 @@ export function GeneralSettingsPanel() {
           }
         />
       </SettingsSection>
+
+      <VoiceDictationSection />
 
       <LegacyFeaturesSection />
     </SettingsPageContainer>
